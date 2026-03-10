@@ -3,6 +3,7 @@ import paho.mqtt.client as mqtt
 import uuid
 import json
 import ssl
+import asyncio
 
 DEVICE_ID = "15eebc7e-5c42-4ce7-ab0d-ec936d09efae"
 
@@ -11,7 +12,7 @@ class AwsMQTT:
         self.api: HttpAwsBlueair = api
         self.client: mqtt.Client | None = None
 
-    async def init(self):
+    async def connect(self):
         self.client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=str(uuid.uuid7()),
@@ -23,9 +24,15 @@ class AwsMQTT:
         def on_log(client, userdata, level, buf):
             print(f"[LOG] {buf}")
 
+            # 1. Get the current event loop
+        loop = asyncio.get_running_loop()
+
+        # 2. Create a Future object
+        future = loop.create_future()
+
         def on_connect(client, userdata, flags, reason_code, properties):
             if reason_code == 0:
-                print("\n[+] SUCCESS! WE ARE IN.")
+                print("\n[+] Connected successfully.")
 
                 # Subscribe to the exact state topic
                 topic_state = f"d/{DEVICE_ID}/s/5s"
@@ -36,8 +43,10 @@ class AwsMQTT:
                 topic_shadow = f"$aws/things/{DEVICE_ID}/shadow/update/documents"
                 print(f"[*] Subscribing to: {topic_shadow}")
                 client.subscribe(topic_shadow)
+                future.set_result(None)
             else:
                 print(f"\n[-] Connection failed with code {reason_code}")
+                future.set_exception(Exception(f"Connection failed with code {reason_code}"))
 
         def on_message(client, userdata, msg):
             print(f"\n[<<< INCOMING MSG <<<] Topic: {msg.topic}")
@@ -55,8 +64,6 @@ class AwsMQTT:
         ssl_context = ssl.create_default_context()
         self.client.tls_set_context(ssl_context)
 
-        await self.api.refresh_access_token()
-
         custom_headers = {
             "X-Amz-CustomAuthorizer-Name": self.api.ca_name,
             "X-Amz-CustomAuthorizer-Signature": self.api.ca_signature,
@@ -67,9 +74,7 @@ class AwsMQTT:
         self.client.ws_set_options(path="/mqtt", headers=custom_headers)
 
         print("[*] Initiating connection...")
-        try:
-            self.client.connect_async(AWS_APIKEYS[self.api.region]["mqttBroker"], 443, 60)
-            self.client.loop_start()
-        except KeyboardInterrupt:
-            print("\n[*] Disconnecting...")
-            self.client.disconnect()
+        self.client.connect_async(AWS_APIKEYS[self.api.region]["mqttBroker"], 443, 60)
+        self.client.loop_start()
+
+        return await future

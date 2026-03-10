@@ -4,9 +4,8 @@ from homeassistant.const import Platform
 
 DOMAIN: str = "blueairhamqtt"
 
-# Integration Setting Constants
+# ripped from ha_blueair or blueair_api, dont feel like messing with it
 CONFIG_FLOW_VERSION: int = 2
-
 
 REGION_EU = "eu"
 REGION_USA = "us"

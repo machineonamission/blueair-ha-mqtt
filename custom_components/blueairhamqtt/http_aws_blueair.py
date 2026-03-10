@@ -6,9 +6,8 @@ from aiohttp import ClientSession, ClientResponse, FormData
 
 from .const import SENSITIVE_FIELD_NAMES
 
-# #               cn:  a2du5f95w7oz2a.ats.iot.cn-north-1.amazonaws.com.cn"
-# #               us:    "a3tpdpjvxk6yog-ats.iot.us-east-2.amazonaws.com"
-# #               other:  a3tpdpjvxk6yog-ats.iot.eu-west-1.amazonaws.com"
+# mostly ripped from blueair_api but with quite heavy modification (mostly to get the mqtt fields)
+
 
 AWS_APIKEYS = {
     "us": {
@@ -114,8 +113,6 @@ class SessionError(BlueAirAPIError):
 
 _LOGGER = getLogger(__name__)
 
-
-# credit to blueair_api
 
 def request_with_active_session(func):
     @functools.wraps(func)
