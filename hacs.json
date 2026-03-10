@@ -1,0 +1,11 @@
+{
+  "name": "BlueAir HA MQTT",
+  "content_in_root": false,
+  "country": [
+    "US",
+    "CN",
+    "EU"
+  ],
+  "homeassistant": "2025.6.0b0",
+  "hacs": "2.0.5"
+}

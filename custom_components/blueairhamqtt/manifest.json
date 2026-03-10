@@ -1,0 +1,18 @@
+{
+  "domain": "blueairhamqtt",
+  "name": "BlueAir HA MQTT",
+  "codeowners": [
+    "@machineonamission"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://www.home-assistant.io/integrations/blueairhamqtt",
+  "homekit": {},
+  "iot_class": "cloud_push",
+  "quality_scale": "bronze",
+  "requirements": [
+    "paho-mqtt==2.1.0"
+  ],
+  "ssdp": [],
+  "zeroconf": []
+}
