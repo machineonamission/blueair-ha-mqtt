@@ -161,6 +161,14 @@ class Device:
             id=self.raw_info["id"],
         )
 
+        # TODO: much of this schema is only useful to the device itself, the only endpoints we have access to are the
+        #  polling ones, and the shadow topic which basically returns what the states key has
+        #  basically i need to collect things into:
+        #  - document objects: visible on the shadow and states key, maybe has an action maybe doesnt
+        #  - polling objects: only visible on the polling endpoints, no action, state only
+        #  - pure actions: in the actions key but with no capability, action with NO state
+        #  there is useful info in the sensors thing, like i can get a slightly more human readable name of each sensor from there
+
         sensors = {
             slug:
                 Sensor(
@@ -209,8 +217,6 @@ class Device:
                     sensor=sensors.get(raw_cap.get("s", None), None),
                 )
             for slug, raw_cap in conf["dc"].items()
-            # sometimes there's these weird pseudo sensors of the firmware version which we dont need as a fucking capability shut up
-            if ("a" in raw_cap or "s" in raw_cap)
         }
 
         states = {
@@ -223,54 +229,20 @@ class Device:
             for raw_state in self.raw_info["states"]
         }
 
-        # artificially add missing capabilities, easier if its all one data type
+        for cap in capabilities.values():
+            if cap.name is None:
+                # mentally awesome way to either get a unique name or join the
+                cap.name = ' + '.join({cap.action.name if cap.action is not None else None,
+                                       cap.sensor.name if cap.sensor is not None else None} - {None})
 
-        sensors_missing_capability = set(sensors.keys()) - set(
-            cap.sensor.slug for cap in capabilities.values() if cap.sensor is not None)
-        actions_missing_capability = set(actions.keys()) - set(
-            cap.action.slug for cap in capabilities.values() if cap.action is not None)
-
-        all_capabilities = copy.deepcopy(capabilities)
-
-        # deal with perhaps capabilities missing a sensor or action, or missing sensor/action duos that need to be assigned together
-
-        for s in sensors_missing_capability:
-            sensor = sensors[s]
-            if s not in all_capabilities:
-                all_capabilities[s] = Capability(
-                    slug=s
-                )
-            if all_capabilities[s].sensor is None:
-                all_capabilities[s].sensor = sensor
-
-        for a in actions_missing_capability:
-            action = actions[a]
-            if a not in all_capabilities:
-                all_capabilities[a] = Capability(
-                    slug=a
-                )
-            if all_capabilities[a].action is None:
-                all_capabilities[a].action = action
-            if all_capabilities[a].data_type is None:
-                # a seems to be some kind of default/suggested value, so its a good place to get a datatype
-                all_capabilities[a].data_type = type(conf["da"][a]["a"])
-
-        for cap_group in [capabilities, all_capabilities]:
-            for cap in cap_group.values():
-                if cap.name is None:
-                    # mentally awesome way to either get a unique name or join the
-                    cap.name = ' + '.join({cap.action.name if cap.action is not None else None,
-                                           cap.sensor.name if cap.sensor is not None else None} - {None})
-                if cap.data_type is None:
-                    # many typeless actions are bools and its a decent default, idfk leave me alone shut up
-                    cap.data_type = bool
+        # for key, state in states.items():
+        #     if key in
 
         self.schema = Schema(
             information=information,
             sensors=sensors,
             actions=actions,
             capabilities=capabilities,
-            all_capabilities=all_capabilities,
             polling_sensors=polling_sensors,
             states=states,
         )
@@ -316,7 +288,6 @@ class Device:
         # mqtt_client.client.subscribe(
         #         [(topic, 0) for topic in topics]
         #     )
-
 
         # fucking aws iot means i can only sub to these endpoints, but theyre good endpoints so
         topics_to_subscribe = [
