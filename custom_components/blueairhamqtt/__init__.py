@@ -14,7 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.typing import ConfigType
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from .api_to_mqtt import api_to_mqtt
+from .api_to_mqtt import setup_mqtt
 from .const import (
     DOMAIN,
     DATA_DEVICES,
@@ -71,11 +71,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
 
     client_session = async_get_clientsession(hass)
     try:
-        _ = await api_to_mqtt(
+        _ = await setup_mqtt(
             username=username,
             password=password,
             client_session=client_session,
             region=region,
+            hass=hass
         )
         hass.data[DOMAIN] = data
 
@@ -89,12 +90,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         raise ConfigEntryNotReady("Login failure") from error
 
 
-async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
-    _LOGGER.debug("unload entry")
-    unload_ok = await hass.config_entries.async_unload_platforms(
-        config_entry
-    )
-    if unload_ok:
-        hass.data[DOMAIN] = None
-
-    return unload_ok
+# async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
+#     _LOGGER.debug("unload entry")
+#     unload_ok = await hass.config_entries.async_unload_platforms(
+#         config_entry
+#     )
+#     if unload_ok:
+#         hass.data[DOMAIN] = None
+#
+#     return unload_ok

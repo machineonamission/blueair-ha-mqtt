@@ -1,4 +1,6 @@
+import copy
 import datetime
+import json
 from functools import cached_property
 from typing import Any
 from dataclasses import dataclass
@@ -6,8 +8,12 @@ from logging import getLogger
 from json import dumps
 import kpn_senml
 
+from homeassistant.components import mqtt
+from homeassistant.core import HomeAssistant
 from .http_aws_blueair import HttpAwsBlueair
 from dataclasses import dataclass, field
+
+from .mqtt_aws import AwsMQTT
 
 _LOGGER = getLogger(__name__)
 
@@ -55,9 +61,39 @@ class Action:
 @dataclass
 class Capability:
     slug: str  # n
-    action: Action | None  # a (maps to slug)
-    sensor: Sensor | None  # s (maps to slug)
-    data_type: type  # t
+    name: str | None = None  # artificial field, have to grab from action/sensor
+    action: Action | None = None  # a (maps to slug)
+    sensor: Sensor | None = None  # s (maps to slug)
+    data_type: type | None = None  # t
+
+    def ha_type(self):
+        if self.sensor is not None and self.action is None:
+            if self.data_type == int:
+                return "sensor"
+            else:
+                return "binary_sensor"
+        else:
+            if self.data_type == int:
+                return "number"
+            else:
+                if self.action is None:
+                    return "button"
+                else:
+                    return "switch"
+
+    def to_discovery_json(self, unique_id):
+        return {
+            "platform": self.ha_type(),
+            "unique_id": f"{unique_id}_{self.slug}",
+            "name": self.name
+        } \
+            | ({
+                   # TODO: probably need a state and command template but we will see what happer with this
+                   "state_topic": f"blueairsensor/{self.sensor.mqtt_topic_name}",
+               } if self.sensor is not None else {}) \
+            | ({
+                   "command_topic": f"blueairaction/{self.action.mqtt_topic_name}",
+               } if self.action is not None else {})
 
 
 @dataclass
@@ -74,6 +110,7 @@ class Schema:
     polling_sensors: dict[str, Sensor]
     actions: dict[str, Action]
     capabilities: dict[str, Capability]
+    all_capabilities: dict[str, Capability]
     states: dict[str, State]
 
 
@@ -126,40 +163,40 @@ class Device:
 
         sensors = {
             slug:
-            Sensor(
-                mqtt_topic_name=raw_sensor["tn"],
-                slug=raw_sensor["n"],
-                time_to_live=raw_sensor["ttl"],
-                name=raw_sensor["ot"],
-                sensor_names=raw_sensor.get("sn", None),
-                enabled=raw_sensor["e"],
-                polling_interval=raw_sensor["i"] if raw_sensor["i"] != 0 else None,
-            )
+                Sensor(
+                    mqtt_topic_name=raw_sensor["tn"],
+                    slug=raw_sensor["n"],
+                    time_to_live=raw_sensor["ttl"],
+                    name=raw_sensor["ot"],
+                    sensor_names=raw_sensor.get("sn", None),
+                    enabled=raw_sensor["e"],
+                    polling_interval=raw_sensor["i"] if raw_sensor["i"] != 0 else None,
+                )
             for slug, raw_sensor in conf["ds"].items() if slug not in ["rt1s", "rt5s", "rt5m", "b5m"]
         }
 
         polling_sensors = {
             slug:
-            Sensor(
-                mqtt_topic_name=raw_sensor["tn"],
-                slug=raw_sensor["n"],
-                time_to_live=raw_sensor["ttl"],
-                name=raw_sensor["ot"],
-                sensor_names=raw_sensor.get("sn", None),
-                enabled=raw_sensor["e"],
-                polling_interval=raw_sensor["i"] if raw_sensor["i"] != 0 else None,
-            )
+                Sensor(
+                    mqtt_topic_name=raw_sensor["tn"],
+                    slug=raw_sensor["n"],
+                    time_to_live=raw_sensor["ttl"],
+                    name=raw_sensor["ot"],
+                    sensor_names=raw_sensor.get("sn", None),
+                    enabled=raw_sensor["e"],
+                    polling_interval=raw_sensor["i"] if raw_sensor["i"] != 0 else None,
+                )
             for slug, raw_sensor in conf["ds"].items() if slug in ["rt1s", "rt5s", "rt5m", "b5m"]
         }
 
         actions = {
             slug:
-            Action(
-                mqtt_topic_name=raw_action["tn"],
-                slug=raw_action["n"],
-                name=raw_action["ot"],
-                enabled=raw_action["e"],
-            )
+                Action(
+                    mqtt_topic_name=raw_action["tn"],
+                    slug=raw_action["n"],
+                    name=raw_action["ot"],
+                    enabled=raw_action["e"],
+                )
             for slug, raw_action in conf["da"].items()
         }
 
@@ -172,6 +209,8 @@ class Device:
                     sensor=sensors.get(raw_cap.get("s", None), None),
                 )
             for slug, raw_cap in conf["dc"].items()
+            # sometimes there's these weird pseudo sensors of the firmware version which we dont need as a fucking capability shut up
+            if ("a" in raw_cap or "s" in raw_cap)
         }
 
         states = {
@@ -184,12 +223,109 @@ class Device:
             for raw_state in self.raw_info["states"]
         }
 
+        # artificially add missing capabilities, easier if its all one data type
+
+        sensors_missing_capability = set(sensors.keys()) - set(
+            cap.sensor.slug for cap in capabilities.values() if cap.sensor is not None)
+        actions_missing_capability = set(actions.keys()) - set(
+            cap.action.slug for cap in capabilities.values() if cap.action is not None)
+
+        all_capabilities = copy.deepcopy(capabilities)
+
+        # deal with perhaps capabilities missing a sensor or action, or missing sensor/action duos that need to be assigned together
+
+        for s in sensors_missing_capability:
+            sensor = sensors[s]
+            if s not in all_capabilities:
+                all_capabilities[s] = Capability(
+                    slug=s
+                )
+            if all_capabilities[s].sensor is None:
+                all_capabilities[s].sensor = sensor
+
+        for a in actions_missing_capability:
+            action = actions[a]
+            if a not in all_capabilities:
+                all_capabilities[a] = Capability(
+                    slug=a
+                )
+            if all_capabilities[a].action is None:
+                all_capabilities[a].action = action
+            if all_capabilities[a].data_type is None:
+                # a seems to be some kind of default/suggested value, so its a good place to get a datatype
+                all_capabilities[a].data_type = type(conf["da"][a]["a"])
+
+        for cap_group in [capabilities, all_capabilities]:
+            for cap in cap_group.values():
+                if cap.name is None:
+                    # mentally awesome way to either get a unique name or join the
+                    cap.name = ' + '.join({cap.action.name if cap.action is not None else None,
+                                           cap.sensor.name if cap.sensor is not None else None} - {None})
+                if cap.data_type is None:
+                    # many typeless actions are bools and its a decent default, idfk leave me alone shut up
+                    cap.data_type = bool
+
         self.schema = Schema(
             information=information,
             sensors=sensors,
             actions=actions,
             capabilities=capabilities,
+            all_capabilities=all_capabilities,
+            polling_sensors=polling_sensors,
             states=states,
         )
 
         return self.schema
+
+    async def broadcast_discovery(self, hass: HomeAssistant):
+        msg = {
+            "device": {
+                # 'configuration_url': "",
+                "connections": [["mac", self.schema.information.current_mac_address]],
+                'identifiers': f"blueairhamqtt_{self.schema.information.id.replace('-', '_')}",
+                'name': self.schema.information.name,
+                'manufacturer': "BlueAir",
+                # 'model': self.schema.information.model_number,
+                'model_id': self.schema.information.model_number,
+                # 'hw_version': "",
+                'sw_version': self.schema.information.firmware.current_version,
+                # 'suggested_area': "",
+                'serial_number': self.schema.information.serial_number,
+            },
+            "origin": {
+                "name": "blueair-ha-mqtt"
+            },
+            "components": {
+                key: cap.to_discovery_json(f"blueairhamqtt_{self.schema.information.id.replace('-', '_')}") for key, cap
+                in self.schema.all_capabilities.items()
+            }
+        }
+
+        await mqtt.async_publish(hass,
+                                 f"homeassistant/device/blueairhamqtt/blueairhamqtt_{self.schema.information.id.replace('-', '_')}/config",
+                                 json.dumps(msg), retain=True)
+
+    async def subscribe_to_updates(self, mqtt_client: AwsMQTT):
+
+        # if cap.action is not None:
+        #     mqtt_client.client.subscribe(cap.action.mqtt_topic_name)
+
+        # topics = [cap.sensor.mqtt_topic_name
+        #           for cap in self.schema.all_capabilities.values()
+        #           if cap.sensor is not None and cap.sensor.enabled]
+        # mqtt_client.client.subscribe(
+        #         [(topic, 0) for topic in topics]
+        #     )
+
+
+        # fucking aws iot means i can only sub to these endpoints, but theyre good endpoints so
+        topics_to_subscribe = [
+            (f"d/{self.schema.information.id}/s/5s", 0),  # The 5-second telemetry firehose
+            (f"$aws/things/{self.schema.information.id}/shadow/update/documents", 0)  # The Shadow updates
+        ]
+
+        mqtt_client.client.subscribe(topics_to_subscribe)
+
+        # mqtt_client.client.subscribe(
+        #     (f"d/{self.schema.information.id}/#",0)
+        #     )

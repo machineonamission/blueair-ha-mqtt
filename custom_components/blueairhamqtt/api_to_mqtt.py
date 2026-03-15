@@ -1,13 +1,18 @@
+from homeassistant.components import mqtt
+from homeassistant.core import HomeAssistant
+from .broker_bridge import bridge_brokers
 from .device import Device
 from .http_aws_blueair import HttpAwsBlueair
 from aiohttp import ClientSession
 
 from .mqtt_aws import AwsMQTT
+from .const import DOMAIN
 
 
-async def api_to_mqtt(
+async def setup_mqtt(
         username: str,
         password: str,
+        hass: HomeAssistant,
         region: str = "us",
         client_session: ClientSession | None = None,
 ):
@@ -29,8 +34,21 @@ async def api_to_mqtt(
         type_name=api_device["type"],
     ) for api_device in api_devices]
 
-    broker = AwsMQTT(api)
-    await broker.connect()
-    # print(api)
-    # api_devices = await api.devices()
-    # print(api_devices)
+    broker = await get_or_init_broker(hass, api)
+
+    # for device in devices:
+    # jank hack to only init one
+    device = devices[0]
+    await device.broadcast_discovery(hass)
+    await device.subscribe_to_updates(broker)
+
+
+async def get_or_init_broker(hass: HomeAssistant, api: HttpAwsBlueair) -> AwsMQTT:
+    if "broker" in hass.data[DOMAIN]:
+        return hass.data[DOMAIN]["broker"]
+    else:
+        broker = AwsMQTT(api)
+        hass.data[DOMAIN]["broker"] = broker
+        await bridge_brokers(hass, broker)
+        await broker.connect(hass)
+        return broker

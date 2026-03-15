@@ -10,7 +10,7 @@ from homeassistant.const import (
     CONF_REGION,
 )
 from homeassistant.core import callback
-from . import api_to_mqtt
+from . import setup_mqtt
 
 from .const import (
     DOMAIN,
@@ -52,7 +52,7 @@ class ConfigFlowHandler(config_entries.ConfigFlow):
 
             api_cloud = None
             try:
-                _ = await api_to_mqtt(
+                _ = await setup_mqtt(
                     username=username,
                     password=password,
                     region=region,
