@@ -36,11 +36,13 @@ async def setup_mqtt(
 
     broker = await get_or_init_broker(hass, api)
 
-    # for device in devices:
-    # jank hack to only init one
-    device = devices[0]
-    await device.broadcast_discovery(hass)
-    await device.subscribe_to_updates(broker)
+    async def on_connect():
+        for device in devices:
+            await device.broadcast_discovery(hass)
+            await device.subscribe_to_updates(broker)
+
+    broker.connect_callbacks.append(on_connect)
+    await on_connect()
 
 
 async def get_or_init_broker(hass: HomeAssistant, api: HttpAwsBlueair) -> AwsMQTT:

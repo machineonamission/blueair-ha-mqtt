@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import datetime
 import json
@@ -40,22 +41,27 @@ class Information:
 #
 @dataclass
 class Sensor:
-    mqtt_topic_name: str  # tn
     slug: str  # n
-    time_to_live: int  # ttl
     name: str  # ot
-    enabled: bool  # e
-    # may be 0 if disabled, otherwise is time in ms
-    polling_interval: int | None  # i
-    sensor_names: list[str]  # sn
+
+    # for bulk/polling sensors :3
+    def to_discovery_json(self, unique_id, sensor_endpoint):
+        return {
+            "platform": "sensor",
+            "unique_id": f"{unique_id}_{self.slug}",
+            "name": self.name,
+            "state_topic": f"blueairsensor/{sensor_endpoint}",
+            "value_template": f"{{{{ value_json | selectattr('n', 'eq', '{self.slug}') | map(attribute='v') | first }}}}",
+            "state_class": "measurement",
+            # have to set this to something that isn't whitespace or else it wont treat it as a number
+            # "unit_of_measurement": "​",
+        }
 
 
 @dataclass
 class Action:
     slug: str  # n
     name: str  # ot
-    mqtt_topic_name: str  # tn
-    enabled: bool  # e
 
 
 @dataclass
@@ -81,18 +87,22 @@ class Capability:
                 else:
                     return "switch"
 
-    def to_discovery_json(self, unique_id):
+    def to_discovery_json(self, unique_id, sensor_endpoint, action_endpoint):
         return {
             "platform": self.ha_type(),
             "unique_id": f"{unique_id}_{self.slug}",
             "name": self.name
         } \
             | ({
-                   # TODO: probably need a state and command template but we will see what happer with this
-                   "state_topic": f"blueairsensor/{self.sensor.mqtt_topic_name}",
+                   "state_topic": f"blueairsensor/{sensor_endpoint}",
+                   "value_template": f"{{{{ value_json.current.state.reported['{self.slug}'] }}}}",
+                   "payload_on": True,
+                   "payload_off": False,
+                   # "value_template": f"{{{{ value_json.current.state.reported['{self.slug}'] }}}}",
                } if self.sensor is not None else {}) \
             | ({
-                   "command_topic": f"blueairaction/{self.action.mqtt_topic_name}",
+                   "command_topic": f"blueairaction/{action_endpoint}",
+                   "command_template": f'{{ "state": {{ "desired": {{ "{self.slug}": {{{{"true" if value else "false"}}}} }} }} }}',
                } if self.action is not None else {})
 
 
@@ -106,12 +116,17 @@ class State:
 @dataclass
 class Schema:
     information: Information
-    sensors: dict[str, Sensor]
-    polling_sensors: dict[str, Sensor]
-    actions: dict[str, Action]
+
+    # sensors: dict[str, Sensor]
+    states_endpoint: str
+    actions_endpoint: str
     capabilities: dict[str, Capability]
-    all_capabilities: dict[str, Capability]
-    states: dict[str, State]
+
+
+    poll_endpoint: str
+    polling_sensors: dict[str, Sensor]
+
+    initial_state: dict[str, State]
 
 
 @dataclass(slots=True)
@@ -169,82 +184,63 @@ class Device:
         #  - pure actions: in the actions key but with no capability, action with NO state
         #  there is useful info in the sensors thing, like i can get a slightly more human readable name of each sensor from there
 
-        sensors = {
-            slug:
-                Sensor(
-                    mqtt_topic_name=raw_sensor["tn"],
+        capabilities = {}
+
+        for slug, raw_cap in self.raw_info["configuration"]["dc"].items():
+            cap = Capability(
+                slug=slug,
+                data_type=int if raw_cap["t"] == "integer" else bool if raw_cap["t"] == "boolean" else None,
+            )
+            if "a" in raw_cap:  # action
+                if raw_cap["a"] in self.raw_info["configuration"]["da"]:
+                    raw_action = self.raw_info["configuration"]["da"][raw_cap["a"]]
+                    cap.action = Action(
+                        slug=raw_action["n"],
+                        name=raw_action["ot"],
+                    )
+            if "s" in raw_cap:  # action
+                if raw_cap["s"] in self.raw_info["configuration"]["ds"]:
+                    raw_sensor = self.raw_info["configuration"]["ds"][raw_cap["s"]]
+                    cap.sensor = Sensor(
+                        slug=raw_sensor["n"],
+                        name=raw_sensor["ot"],
+                    )
+            # mentally awesome way to either get a unique name or join
+            # no clue if action/sensor ever differs, but eh futureproofing i suppose
+            cap.name = (' + '.join({cap.action.name if cap.action is not None else None,
+                                    cap.sensor.name if cap.sensor is not None else None} - {None})) or slug
+
+            if cap.action or cap.sensor:
+                # filters out stupid shit like firmware version that we Already Have
+                capabilities[slug] = cap
+
+        polling_sensors = {}
+        for raw_name in self.raw_info["configuration"]["ds"]["rt5s"]["sn"]:
+            if raw_name in self.raw_info["configuration"]["ds"]:
+                raw_sensor = self.raw_info["configuration"]["ds"][raw_name]
+                sensor = Sensor(
                     slug=raw_sensor["n"],
-                    time_to_live=raw_sensor["ttl"],
                     name=raw_sensor["ot"],
-                    sensor_names=raw_sensor.get("sn", None),
-                    enabled=raw_sensor["e"],
-                    polling_interval=raw_sensor["i"] if raw_sensor["i"] != 0 else None,
                 )
-            for slug, raw_sensor in conf["ds"].items() if slug not in ["rt1s", "rt5s", "rt5m", "b5m"]
-        }
-
-        polling_sensors = {
-            slug:
-                Sensor(
-                    mqtt_topic_name=raw_sensor["tn"],
-                    slug=raw_sensor["n"],
-                    time_to_live=raw_sensor["ttl"],
-                    name=raw_sensor["ot"],
-                    sensor_names=raw_sensor.get("sn", None),
-                    enabled=raw_sensor["e"],
-                    polling_interval=raw_sensor["i"] if raw_sensor["i"] != 0 else None,
+            else:
+                sensor = Sensor(
+                    slug=raw_name,
+                    name=raw_name
                 )
-            for slug, raw_sensor in conf["ds"].items() if slug in ["rt1s", "rt5s", "rt5m", "b5m"]
-        }
-
-        actions = {
-            slug:
-                Action(
-                    mqtt_topic_name=raw_action["tn"],
-                    slug=raw_action["n"],
-                    name=raw_action["ot"],
-                    enabled=raw_action["e"],
-                )
-            for slug, raw_action in conf["da"].items()
-        }
-
-        capabilities = {
-            slug:
-                Capability(
-                    slug=raw_cap["n"],
-                    data_type=int if raw_cap["t"] == "integer" else bool,
-                    action=actions.get(raw_cap.get("a", None), None),
-                    sensor=sensors.get(raw_cap.get("s", None), None),
-                )
-            for slug, raw_cap in conf["dc"].items()
-        }
-
-        states = {
-            raw_state["n"]:
-                State(
-                    slug=raw_state["n"],
-                    value=raw_state["v"] if "v" in raw_state else raw_state["vb"],
-                    time=datetime.datetime.fromtimestamp(raw_state["t"], datetime.timezone.utc)
-                )
-            for raw_state in self.raw_info["states"]
-        }
-
-        for cap in capabilities.values():
-            if cap.name is None:
-                # mentally awesome way to either get a unique name or join the
-                cap.name = ' + '.join({cap.action.name if cap.action is not None else None,
-                                       cap.sensor.name if cap.sensor is not None else None} - {None})
-
-        # for key, state in states.items():
-        #     if key in
+            polling_sensors[raw_name] = sensor
 
         self.schema = Schema(
             information=information,
-            sensors=sensors,
-            actions=actions,
+
             capabilities=capabilities,
             polling_sensors=polling_sensors,
-            states=states,
+
+            initial_state=self.raw_info["states"],
+
+            poll_endpoint=self.raw_info["configuration"]["ds"]["rt5s"]["tn"],
+            # no this isnt anywhere in the damn api but this is literally also how BA does it in the app fuck off
+            states_endpoint=f"$aws/things/{information.id}/shadow/update/documents",
+            actions_endpoint=f"$aws/things/{information.id}/shadow/update"
         )
 
         return self.schema
@@ -268,9 +264,16 @@ class Device:
                 "name": "blueair-ha-mqtt"
             },
             "components": {
-                key: cap.to_discovery_json(f"blueairhamqtt_{self.schema.information.id.replace('-', '_')}") for key, cap
-                in self.schema.all_capabilities.items()
-            }
+                              key: cap.to_discovery_json(
+                                  f"blueairhamqtt_{self.schema.information.id.replace('-', '_')}",
+                                  self.schema.states_endpoint, self.schema.actions_endpoint) for key, cap
+                              in self.schema.capabilities.items()
+                          } | {
+                              key: sen.to_discovery_json(
+                                  f"blueairhamqtt_{self.schema.information.id.replace('-', '_')}",
+                                  self.schema.poll_endpoint) for key, sen
+                              in self.schema.polling_sensors.items()
+                          }
         }
 
         await mqtt.async_publish(hass,
@@ -279,24 +282,11 @@ class Device:
 
     async def subscribe_to_updates(self, mqtt_client: AwsMQTT):
 
-        # if cap.action is not None:
-        #     mqtt_client.client.subscribe(cap.action.mqtt_topic_name)
-
-        # topics = [cap.sensor.mqtt_topic_name
-        #           for cap in self.schema.all_capabilities.values()
-        #           if cap.sensor is not None and cap.sensor.enabled]
-        # mqtt_client.client.subscribe(
-        #         [(topic, 0) for topic in topics]
-        #     )
-
-        # fucking aws iot means i can only sub to these endpoints, but theyre good endpoints so
+        # i tested it, these are the only endpoints that are valid.
+        # every other subscription resets the entire damn connection, thanks amerzon!!
         topics_to_subscribe = [
-            (f"d/{self.schema.information.id}/s/5s", 0),  # The 5-second telemetry firehose
-            (f"$aws/things/{self.schema.information.id}/shadow/update/documents", 0)  # The Shadow updates
+            (self.schema.poll_endpoint, 0),
+            (self.schema.states_endpoint, 0)
         ]
 
         mqtt_client.client.subscribe(topics_to_subscribe)
-
-        # mqtt_client.client.subscribe(
-        #     (f"d/{self.schema.information.id}/#",0)
-        #     )

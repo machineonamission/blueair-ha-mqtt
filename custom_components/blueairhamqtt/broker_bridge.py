@@ -16,9 +16,10 @@ async def bridge_brokers(
     await mqtt.async_wait_for_mqtt_client(hass)
 
     async def ha_to_aws_callback(msg: ReceiveMessage):
-        print("ha -> aws", msg.topic, msg.payload)
+        topic = msg.topic.replace("blueairaction/", "")
+        print("ha -> aws", topic, msg.payload)
         source_broker.client.publish(
-            topic=msg.topic.replace("blueairaction/", ""),
+            topic=topic,
             payload=msg.payload,
             qos=msg.qos,
             retain=msg.retain,

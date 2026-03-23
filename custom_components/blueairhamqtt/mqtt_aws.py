@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Callable, Awaitable, Coroutine
 
 from paho.mqtt.enums import MQTTErrorCode
 
@@ -20,6 +20,11 @@ class AwsMQTT:
             transport="websockets",
             clean_session=True
         )
+        self.connect_callbacks: list[Callable[[], Coroutine[None, None, None]]] = []
+
+    async def run_on_connect(self):
+        for callback in self.connect_callbacks:
+            await callback()
 
     async def connect(self, hass: HomeAssistant):
         def on_log(client, userdata, level, buf):
@@ -38,6 +43,8 @@ class AwsMQTT:
                 print(f"\n[-] Connection failed with code {reason_code}")
                 future.set_exception(Exception(f"Connection failed with code {reason_code}"))
 
+            loop.create_task(self.run_on_connect())
+
         # def on_message(client, userdata, msg):
         #     print(f"\n[<<< INCOMING MSG <<<] Topic: {msg.topic}")
         #     try:
@@ -53,6 +60,8 @@ class AwsMQTT:
         self.client.on_connect = on_connect
         self.client.on_disconnect = on_disconnect
         self.client.on_connect_fail = print
+
+        self.client.subscribe_callback()
 
         # self.client.on_message = on_message
         #
